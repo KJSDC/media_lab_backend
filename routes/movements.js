@@ -173,6 +173,8 @@ router.get("/borrower", async (req, res) => {
          m.contact,
          m.role,
          m.due_date,
+         m.purpose,
+         m.comments,
          json_agg(
            json_build_object(
              'item_id',            mi.item_id,
