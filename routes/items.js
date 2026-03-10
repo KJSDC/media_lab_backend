@@ -1,25 +1,10 @@
 const express = require("express");
 const router = express.Router();
-const multer = require("multer");
-const path = require("path");
 const db = require("../db");
 
-// Multer setup — saves files to server/uploads/
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, path.join(__dirname, "../uploads")),
-  filename: (req, file, cb) => {
-    const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    cb(null, unique + path.extname(file.originalname));
-  },
-});
-const upload = multer({
-  storage,
-  limits: { fileSize: 3 * 1024 * 1024 }, // 3MB
-  fileFilter: (req, file, cb) => {
-    const allowed = /jpeg|jpg|png|gif|svg|webp/;
-    cb(null, allowed.test(path.extname(file.originalname).toLowerCase()));
-  },
-});
+// Increase JSON limit for base64 images
+router.use(express.json({ limit: "10mb" }));
+router.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 // @route   GET api/items/stats
 // @desc    Get dashboard statistics
@@ -27,13 +12,13 @@ router.get("/stats", async (req, res) => {
   try {
     const totalResult = await db.query("SELECT COUNT(*) as total FROM items");
     const availableResult = await db.query(
-      "SELECT SUM(available_quantity) as available FROM items",
+      "SELECT SUM(available_quantity) as available FROM items"
     );
     const categoriesResult = await db.query(
-      "SELECT COUNT(DISTINCT category) as cats FROM items",
+      "SELECT COUNT(DISTINCT category) as cats FROM items"
     );
     const lowStockResult = await db.query(
-      "SELECT COUNT(*) as low FROM items WHERE available_quantity <= 2",
+      "SELECT COUNT(*) as low FROM items WHERE available_quantity <= 2"
     );
 
     res.json({
@@ -57,6 +42,7 @@ router.get("/", async (req, res) => {
   try {
     const { search } = req.query;
     let result;
+
     if (search && search.trim()) {
       const q = `%${search.trim()}%`;
       result = await db.query(
@@ -68,11 +54,12 @@ router.get("/", async (req, res) => {
             OR location_room ILIKE $1
          ORDER BY created_at DESC
          LIMIT 50`,
-        [q],
+        [q]
       );
     } else {
       result = await db.query("SELECT * FROM items ORDER BY created_at DESC");
     }
+
     res.json({ success: true, items: result.rows });
   } catch (err) {
     console.error(err.message);
@@ -80,9 +67,27 @@ router.get("/", async (req, res) => {
   }
 });
 
+// @route   GET api/items/:id
+// @desc    Get single item by ID
+router.get("/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await db.query("SELECT * FROM items WHERE id = $1", [id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Item not found" });
+    }
+
+    res.json({ success: true, item: result.rows[0] });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 // @route   POST api/items
-// @desc    Add new item (with optional photo)
-router.post("/", upload.single("photo"), async (req, res) => {
+// @desc    Add new item (with optional base64 photo)
+router.post("/", async (req, res) => {
   try {
     const {
       name,
@@ -95,35 +100,53 @@ router.post("/", upload.single("photo"), async (req, res) => {
       vendor,
       locationRoom,
       locationShelf,
+      photo, // base64 string: "data:image/jpeg;base64,/9j/..." or raw base64
     } = req.body;
 
+    // Validate required fields
+    if (!name || !category) {
+      return res.status(400).json({
+        success: false,
+        message: "Name and category are required",
+      });
+    }
+
     const initQty = quantity ? parseInt(quantity) : 1;
-    const imageUrl = req.file ? `/uploads/${req.file.filename}` : null;
 
     // Auto-generate asset tag if not provided
     const finalAssetTag = assetTag || `ML-${Date.now()}`;
 
+    // Strip the data URI prefix if present
+    // e.g. "data:image/jpeg;base64,XXXX" → "XXXX"
+    let imageB64 = null;
+    if (photo) {
+      imageB64 = photo.includes("base64,")
+        ? photo.split("base64,")[1]
+        : photo;
+    }
+
     const result = await db.query(
       `INSERT INTO items 
-       (name, category, asset_tag, description, initial_quantity, available_quantity, purchase_cost, purchase_date, vendor, location_room, location_shelf, image_url)
+       (name, category, asset_tag, description, initial_quantity, available_quantity,
+        purchase_cost, purchase_date, vendor, location_room, location_shelf, image_b64)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
       [
         name,
         category,
         finalAssetTag,
-        description,
+        description || null,
         initQty,
         initQty,
         purchasePrice || null,
         purchaseDate || null,
-        vendor,
-        locationRoom,
-        locationShelf,
-        imageUrl,
-      ],
+        vendor || null,
+        locationRoom || null,
+        locationShelf || null,
+        imageB64,
+      ]
     );
 
-    res.json({ success: true, item: result.rows[0] });
+    res.status(201).json({ success: true, item: result.rows[0] });
   } catch (err) {
     console.error(err.message);
     if (err.code === "23505") {
@@ -136,8 +159,8 @@ router.post("/", upload.single("photo"), async (req, res) => {
 });
 
 // @route   PUT api/items/:id
-// @desc    Update an item
-router.put("/:id", upload.single("photo"), async (req, res) => {
+// @desc    Update an item (with optional new base64 photo)
+router.put("/:id", async (req, res) => {
   try {
     const { id } = req.params;
     const {
@@ -153,43 +176,57 @@ router.put("/:id", upload.single("photo"), async (req, res) => {
       locationRoom,
       locationShelf,
       status,
+      photo, // base64 string (optional — omit to keep existing image)
     } = req.body;
 
-    // Fetch existing to preserve image if no new one uploaded
+    // Fetch existing item
     const existing = await db.query("SELECT * FROM items WHERE id = $1", [id]);
     if (existing.rows.length === 0) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Item not found" });
+      return res.status(404).json({ success: false, message: "Item not found" });
     }
 
-    const imageUrl = req.file
-      ? `/uploads/${req.file.filename}`
-      : existing.rows[0].image_url;
+    const existingItem = existing.rows[0];
+
+    // Use new photo if provided, otherwise keep the existing one
+    let imageB64 = existingItem.image_b64;
+    if (photo) {
+      imageB64 = photo.includes("base64,")
+        ? photo.split("base64,")[1]
+        : photo;
+    }
 
     const result = await db.query(
       `UPDATE items SET
-         name = $1, category = $2, asset_tag = $3, description = $4,
-         initial_quantity = $5, available_quantity = $6,
-         purchase_cost = $7, purchase_date = $8, vendor = $9,
-         location_room = $10, location_shelf = $11, status = $12, image_url = $13
+         name = $1,
+         category = $2,
+         asset_tag = $3,
+         description = $4,
+         initial_quantity = $5,
+         available_quantity = $6,
+         purchase_cost = $7,
+         purchase_date = $8,
+         vendor = $9,
+         location_room = $10,
+         location_shelf = $11,
+         status = $12,
+         image_b64 = $13
        WHERE id = $14 RETURNING *`,
       [
-        name,
-        category,
-        assetTag,
-        description,
-        parseInt(quantity) || existing.rows[0].initial_quantity,
-        parseInt(availableQuantity) ?? existing.rows[0].available_quantity,
-        purchasePrice || null,
-        purchaseDate || null,
-        vendor,
-        locationRoom,
-        locationShelf,
-        status || "Available",
-        imageUrl,
+        name || existingItem.name,
+        category || existingItem.category,
+        assetTag || existingItem.asset_tag,
+        description ?? existingItem.description,
+        parseInt(quantity) || existingItem.initial_quantity,
+        parseInt(availableQuantity) ?? existingItem.available_quantity,
+        purchasePrice || existingItem.purchase_cost,
+        purchaseDate || existingItem.purchase_date,
+        vendor ?? existingItem.vendor,
+        locationRoom ?? existingItem.location_room,
+        locationShelf ?? existingItem.location_shelf,
+        status || existingItem.status || "Available",
+        imageB64,
         id,
-      ],
+      ]
     );
 
     res.json({ success: true, item: result.rows[0] });
@@ -204,21 +241,75 @@ router.put("/:id", upload.single("photo"), async (req, res) => {
   }
 });
 
+// @route   PATCH api/items/:id/image
+// @desc    Update only the image of an item
+router.patch("/:id/image", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { photo } = req.body;
+
+    if (!photo) {
+      return res.status(400).json({ success: false, message: "No image provided" });
+    }
+
+    const imageB64 = photo.includes("base64,")
+      ? photo.split("base64,")[1]
+      : photo;
+
+    const result = await db.query(
+      "UPDATE items SET image_b64 = $1 WHERE id = $2 RETURNING id, name, image_b64",
+      [imageB64, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Item not found" });
+    }
+
+    res.json({ success: true, item: result.rows[0] });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// @route   DELETE api/items/:id/image
+// @desc    Remove image from an item
+router.delete("/:id/image", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await db.query(
+      "UPDATE items SET image_b64 = NULL WHERE id = $1 RETURNING id, name",
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Item not found" });
+    }
+
+    res.json({ success: true, message: "Image removed", item: result.rows[0] });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // @route   DELETE api/items/:id
 // @desc    Delete an item
 router.delete("/:id", async (req, res) => {
   try {
     const { id } = req.params;
+
     const result = await db.query(
-      "DELETE FROM items WHERE id = $1 RETURNING id",
-      [id],
+      "DELETE FROM items WHERE id = $1 RETURNING id, name",
+      [id]
     );
+
     if (result.rows.length === 0) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Item not found" });
+      return res.status(404).json({ success: false, message: "Item not found" });
     }
-    res.json({ success: true, message: "Item deleted" });
+
+    res.json({ success: true, message: `Item "${result.rows[0].name}" deleted` });
   } catch (err) {
     console.error(err.message);
     res.status(500).json({ success: false, message: err.message });
