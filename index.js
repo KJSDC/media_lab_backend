@@ -6,21 +6,20 @@ const path = require("path");
 const app = express();
 const port = process.env.PORT || 5000;
 
-const corsOptions = {
+// ✅ CORS — handles preflight automatically, no app.options needed
+app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
-};
+  preflightContinue: false,
+  optionsSuccessStatus: 204,
+}));
 
-// ✅ CORS — must be FIRST
-app.use(cors(corsOptions));
-app.options("/(.*)", cors(corsOptions));
-
-// ✅ Body parsers — once, with 10mb limit
+// ✅ Body parsers
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-// Serve uploaded photos (kept for backwards compat)
+// Serve uploaded photos
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // Database connection
