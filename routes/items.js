@@ -1,16 +1,35 @@
 const express = require("express");
 const router = express.Router();
+const multer = require("multer");
 const db = require("../db");
 
-// Increase JSON limit for base64 images
-router.use(express.json({ limit: "10mb" }));
-router.use(express.urlencoded({ extended: true, limit: "10mb" }));
+// Multer — store in MEMORY (not disk), convert to base64
+const storage = multer.memoryStorage();
+const upload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (req, file, cb) => {
+    const allowed = /jpeg|jpg|png|gif|svg|webp/;
+    const valid =
+      allowed.test(file.mimetype) ||
+      allowed.test(file.originalname.toLowerCase());
+    cb(null, valid);
+  },
+});
 
-// @route   GET api/items/stats
+// Helper: convert multer memory buffer → base64 data URI
+const toBase64 = (file) => {
+  if (!file) return null;
+  return `data:${file.mimetype};base64,${file.buffer.toString("base64")}`;
+};
+
+// @route   GET /api/items/stats
 // @desc    Get dashboard statistics
 router.get("/stats", async (req, res) => {
   try {
-    const totalResult = await db.query("SELECT COUNT(*) as total FROM items");
+    const totalResult = await db.query(
+      "SELECT COUNT(*) as total FROM items"
+    );
     const availableResult = await db.query(
       "SELECT SUM(available_quantity) as available FROM items"
     );
@@ -36,7 +55,7 @@ router.get("/stats", async (req, res) => {
   }
 });
 
-// @route   GET api/items
+// @route   GET /api/items
 // @desc    Get all items (optional ?search= query)
 router.get("/", async (req, res) => {
   try {
@@ -67,16 +86,15 @@ router.get("/", async (req, res) => {
   }
 });
 
-// @route   GET api/items/:id
+// @route   GET /api/items/:id
 // @desc    Get single item by ID
 router.get("/:id", async (req, res) => {
   try {
     const { id } = req.params;
     const result = await db.query("SELECT * FROM items WHERE id = $1", [id]);
 
-    if (result.rows.length === 0) {
+    if (result.rows.length === 0)
       return res.status(404).json({ success: false, message: "Item not found" });
-    }
 
     res.json({ success: true, item: result.rows[0] });
   } catch (err) {
@@ -85,9 +103,9 @@ router.get("/:id", async (req, res) => {
   }
 });
 
-// @route   POST api/items
-// @desc    Add new item (with optional base64 photo)
-router.post("/", async (req, res) => {
+// @route   POST /api/items
+// @desc    Add new item — send as multipart/form-data, photo field is the image file
+router.post("/", upload.single("photo"), async (req, res) => {
   try {
     const {
       name,
@@ -100,10 +118,8 @@ router.post("/", async (req, res) => {
       vendor,
       locationRoom,
       locationShelf,
-      photo, // base64 string: "data:image/jpeg;base64,/9j/..." or raw base64
     } = req.body;
 
-    // Validate required fields
     if (!name || !category) {
       return res.status(400).json({
         success: false,
@@ -112,24 +128,14 @@ router.post("/", async (req, res) => {
     }
 
     const initQty = quantity ? parseInt(quantity) : 1;
-
-    // Auto-generate asset tag if not provided
     const finalAssetTag = assetTag || `ML-${Date.now()}`;
-
-    // Strip the data URI prefix if present
-    // e.g. "data:image/jpeg;base64,XXXX" → "XXXX"
-    let imageB64 = null;
-    if (photo) {
-      imageB64 = photo.includes("base64,")
-        ? photo.split("base64,")[1]
-        : photo;
-    }
+    const imageB64 = toBase64(req.file); // null if no file uploaded
 
     const result = await db.query(
-      `INSERT INTO items 
+      `INSERT INTO items
        (name, category, asset_tag, description, initial_quantity, available_quantity,
         purchase_cost, purchase_date, vendor, location_room, location_shelf, image_b64)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
       [
         name,
         category,
@@ -149,18 +155,17 @@ router.post("/", async (req, res) => {
     res.status(201).json({ success: true, item: result.rows[0] });
   } catch (err) {
     console.error(err.message);
-    if (err.code === "23505") {
+    if (err.code === "23505")
       return res
         .status(400)
         .json({ success: false, message: "Asset tag already exists" });
-    }
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// @route   PUT api/items/:id
-// @desc    Update an item (with optional new base64 photo)
-router.put("/:id", async (req, res) => {
+// @route   PUT /api/items/:id
+// @desc    Update an item — send as multipart/form-data, photo field optional
+router.put("/:id", upload.single("photo"), async (req, res) => {
   try {
     const { id } = req.params;
     const {
@@ -176,24 +181,16 @@ router.put("/:id", async (req, res) => {
       locationRoom,
       locationShelf,
       status,
-      photo, // base64 string (optional — omit to keep existing image)
     } = req.body;
 
-    // Fetch existing item
     const existing = await db.query("SELECT * FROM items WHERE id = $1", [id]);
-    if (existing.rows.length === 0) {
+    if (existing.rows.length === 0)
       return res.status(404).json({ success: false, message: "Item not found" });
-    }
 
     const existingItem = existing.rows[0];
 
-    // Use new photo if provided, otherwise keep the existing one
-    let imageB64 = existingItem.image_b64;
-    if (photo) {
-      imageB64 = photo.includes("base64,")
-        ? photo.split("base64,")[1]
-        : photo;
-    }
+    // Use new photo if uploaded, otherwise keep existing
+    const imageB64 = req.file ? toBase64(req.file) : existingItem.image_b64;
 
     const result = await db.query(
       `UPDATE items SET
@@ -232,38 +229,34 @@ router.put("/:id", async (req, res) => {
     res.json({ success: true, item: result.rows[0] });
   } catch (err) {
     console.error(err.message);
-    if (err.code === "23505") {
+    if (err.code === "23505")
       return res
         .status(400)
         .json({ success: false, message: "Asset tag already exists" });
-    }
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// @route   PATCH api/items/:id/image
+// @route   PATCH /api/items/:id/image
 // @desc    Update only the image of an item
-router.patch("/:id/image", async (req, res) => {
+router.patch("/:id/image", upload.single("photo"), async (req, res) => {
   try {
     const { id } = req.params;
-    const { photo } = req.body;
 
-    if (!photo) {
-      return res.status(400).json({ success: false, message: "No image provided" });
-    }
+    if (!req.file)
+      return res
+        .status(400)
+        .json({ success: false, message: "No image provided" });
 
-    const imageB64 = photo.includes("base64,")
-      ? photo.split("base64,")[1]
-      : photo;
+    const imageB64 = toBase64(req.file);
 
     const result = await db.query(
       "UPDATE items SET image_b64 = $1 WHERE id = $2 RETURNING id, name, image_b64",
       [imageB64, id]
     );
 
-    if (result.rows.length === 0) {
+    if (result.rows.length === 0)
       return res.status(404).json({ success: false, message: "Item not found" });
-    }
 
     res.json({ success: true, item: result.rows[0] });
   } catch (err) {
@@ -272,7 +265,7 @@ router.patch("/:id/image", async (req, res) => {
   }
 });
 
-// @route   DELETE api/items/:id/image
+// @route   DELETE /api/items/:id/image
 // @desc    Remove image from an item
 router.delete("/:id/image", async (req, res) => {
   try {
@@ -283,9 +276,8 @@ router.delete("/:id/image", async (req, res) => {
       [id]
     );
 
-    if (result.rows.length === 0) {
+    if (result.rows.length === 0)
       return res.status(404).json({ success: false, message: "Item not found" });
-    }
 
     res.json({ success: true, message: "Image removed", item: result.rows[0] });
   } catch (err) {
@@ -294,7 +286,7 @@ router.delete("/:id/image", async (req, res) => {
   }
 });
 
-// @route   DELETE api/items/:id
+// @route   DELETE /api/items/:id
 // @desc    Delete an item
 router.delete("/:id", async (req, res) => {
   try {
@@ -305,11 +297,13 @@ router.delete("/:id", async (req, res) => {
       [id]
     );
 
-    if (result.rows.length === 0) {
+    if (result.rows.length === 0)
       return res.status(404).json({ success: false, message: "Item not found" });
-    }
 
-    res.json({ success: true, message: `Item "${result.rows[0].name}" deleted` });
+    res.json({
+      success: true,
+      message: `Item "${result.rows[0].name}" deleted`,
+    });
   } catch (err) {
     console.error(err.message);
     res.status(500).json({ success: false, message: err.message });
