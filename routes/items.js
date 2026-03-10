@@ -28,16 +28,16 @@ const toBase64 = (file) => {
 router.get("/stats", async (req, res) => {
   try {
     const totalResult = await db.query(
-      "SELECT COUNT(*) as total FROM items"
+      "SELECT COUNT(*) as total FROM items WHERE is_active = true",
     );
     const availableResult = await db.query(
-      "SELECT SUM(available_quantity) as available FROM items"
+      "SELECT SUM(available_quantity) as available FROM items WHERE is_active = true",
     );
     const categoriesResult = await db.query(
-      "SELECT COUNT(DISTINCT category) as cats FROM items"
+      "SELECT COUNT(DISTINCT category) as cats FROM items WHERE is_active = true",
     );
     const lowStockResult = await db.query(
-      "SELECT COUNT(*) as low FROM items WHERE available_quantity <= 2"
+      "SELECT COUNT(*) as low FROM items WHERE available_quantity <= 2 AND is_active = true",
     );
 
     res.json({
@@ -73,7 +73,7 @@ router.get("/", async (req, res) => {
             OR location_room ILIKE $1
          ORDER BY created_at DESC
          LIMIT 50`,
-        [q]
+        [q],
       );
     } else {
       result = await db.query("SELECT * FROM items ORDER BY created_at DESC");
@@ -94,7 +94,9 @@ router.get("/:id", async (req, res) => {
     const result = await db.query("SELECT * FROM items WHERE id = $1", [id]);
 
     if (result.rows.length === 0)
-      return res.status(404).json({ success: false, message: "Item not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Item not found" });
 
     res.json({ success: true, item: result.rows[0] });
   } catch (err) {
@@ -149,7 +151,7 @@ router.post("/", upload.single("photo"), async (req, res) => {
         locationRoom || null,
         locationShelf || null,
         imageB64,
-      ]
+      ],
     );
 
     res.status(201).json({ success: true, item: result.rows[0] });
@@ -185,12 +187,29 @@ router.put("/:id", upload.single("photo"), async (req, res) => {
 
     const existing = await db.query("SELECT * FROM items WHERE id = $1", [id]);
     if (existing.rows.length === 0)
-      return res.status(404).json({ success: false, message: "Item not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Item not found" });
 
     const existingItem = existing.rows[0];
 
     // Use new photo if uploaded, otherwise keep existing
     const imageB64 = req.file ? toBase64(req.file) : existingItem.image_b64;
+
+    // Determine if item should be inactive based on status
+    const newStatus = status || existingItem.status || "Available";
+    const inactiveStatuses = ["Under Service", "Damaged", "Lost", "Wear/Tear"];
+
+    // Explicit toggle if provided in body, else derive from status
+    let finalIsActive = existingItem.is_active;
+    if (req.body.is_active !== undefined) {
+      finalIsActive =
+        req.body.is_active === "true" || req.body.is_active === true;
+    } else if (inactiveStatuses.includes(newStatus)) {
+      finalIsActive = false;
+    } else if (newStatus === "Available") {
+      finalIsActive = true;
+    }
 
     const result = await db.query(
       `UPDATE items SET
@@ -206,8 +225,9 @@ router.put("/:id", upload.single("photo"), async (req, res) => {
          location_room = $10,
          location_shelf = $11,
          status = $12,
-         image_b64 = $13
-       WHERE id = $14 RETURNING *`,
+         image_b64 = $13,
+         is_active = $14
+       WHERE id = $15 RETURNING *`,
       [
         name || existingItem.name,
         category || existingItem.category,
@@ -220,10 +240,11 @@ router.put("/:id", upload.single("photo"), async (req, res) => {
         vendor ?? existingItem.vendor,
         locationRoom ?? existingItem.location_room,
         locationShelf ?? existingItem.location_shelf,
-        status || existingItem.status || "Available",
+        newStatus,
         imageB64,
+        finalIsActive,
         id,
-      ]
+      ],
     );
 
     res.json({ success: true, item: result.rows[0] });
@@ -252,11 +273,13 @@ router.patch("/:id/image", upload.single("photo"), async (req, res) => {
 
     const result = await db.query(
       "UPDATE items SET image_b64 = $1 WHERE id = $2 RETURNING id, name, image_b64",
-      [imageB64, id]
+      [imageB64, id],
     );
 
     if (result.rows.length === 0)
-      return res.status(404).json({ success: false, message: "Item not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Item not found" });
 
     res.json({ success: true, item: result.rows[0] });
   } catch (err) {
@@ -273,13 +296,43 @@ router.delete("/:id/image", async (req, res) => {
 
     const result = await db.query(
       "UPDATE items SET image_b64 = NULL WHERE id = $1 RETURNING id, name",
-      [id]
+      [id],
     );
 
     if (result.rows.length === 0)
-      return res.status(404).json({ success: false, message: "Item not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Item not found" });
 
     res.json({ success: true, message: "Image removed", item: result.rows[0] });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// @route   PATCH /api/items/:id/active
+// @desc    Toggle an item's active/inactive status
+router.patch("/:id/active", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { is_active } = req.body;
+
+    const result = await db.query(
+      "UPDATE items SET is_active = $1 WHERE id = $2 RETURNING *",
+      [is_active, id],
+    );
+
+    if (result.rows.length === 0)
+      return res
+        .status(404)
+        .json({ success: false, message: "Item not found" });
+
+    res.json({
+      success: true,
+      message: `Item marked as ${is_active ? "Active" : "Inactive"}`,
+      item: result.rows[0],
+    });
   } catch (err) {
     console.error(err.message);
     res.status(500).json({ success: false, message: err.message });
@@ -294,11 +347,13 @@ router.delete("/:id", async (req, res) => {
 
     const result = await db.query(
       "DELETE FROM items WHERE id = $1 RETURNING id, name",
-      [id]
+      [id],
     );
 
     if (result.rows.length === 0)
-      return res.status(404).json({ success: false, message: "Item not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Item not found" });
 
     res.json({
       success: true,
