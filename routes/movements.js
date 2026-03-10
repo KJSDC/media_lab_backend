@@ -16,7 +16,7 @@ router.get("/", async (req, res) => {
             'name',      i.name,
             'asset_tag', i.asset_tag,
             'category',  i.category,
-            'image_url', i.image_url
+            'image_b64', i.image_b64
           )
         ) AS items
       FROM movements m
@@ -139,7 +139,7 @@ router.get("/active", async (req, res) => {
             'quantity',  mi.quantity,
             'name',      i.name,
             'asset_tag', i.asset_tag,
-            'image_url', i.image_url
+            'image_b64', i.image_b64
           )
         ) AS items
       FROM movements m
@@ -183,7 +183,7 @@ router.get("/borrower", async (req, res) => {
              'name',               i.name,
              'asset_tag',          i.asset_tag,
              'category',           i.category,
-             'image_url',          i.image_url,
+             'image_b64',          i.image_b64,
              'initial_quantity',   i.initial_quantity,
              'available_quantity', i.available_quantity
            )
