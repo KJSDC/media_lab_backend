@@ -2,9 +2,9 @@ const { Pool } = require("pg");
 
 const pool = new Pool({
 
-  ssl: {
-    rejectUnauthorized: false
-  }
+  // ssl: {
+  //   rejectUnauthorized: false
+  // }
 });
 
 module.exports = {
